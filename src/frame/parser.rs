@@ -1,5 +1,7 @@
 use r2d2;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::convert::TryInto;
 use std::io::{Cursor, Read};
 use std::ops::Deref;
 
@@ -23,7 +25,10 @@ where
     parse_frame(conn.deref(), compressor)
 }
 
-pub fn parse_frame(cursor_cell: &RefCell<dyn Read>, compressor: &Compression) -> error::Result<Frame> {
+pub fn parse_frame(
+    cursor_cell: &RefCell<dyn Read>,
+    compressor: &Compression,
+) -> error::Result<Frame> {
     let mut version_bytes = [0; Version::BYTE_LENGTH];
     let mut flag_bytes = [0; Flag::BYTE_LENGTH];
     let mut opcode_bytes = [0; Opcode::BYTE_LENGTH];
@@ -78,6 +83,13 @@ pub fn parse_frame(cursor_cell: &RefCell<dyn Read>, compressor: &Compression) ->
         vec![]
     };
 
+    let custom_payload = if flags.iter().any(|flag| flag == &Flag::CustomPayload) {
+        let payload = read_bytes_map(&mut body_cursor).unwrap();
+        Some(payload)
+    } else {
+        None
+    };
+
     let mut body = vec![];
 
     body_cursor.read_to_end(&mut body)?;
@@ -103,4 +115,76 @@ fn convert_frame_into_result(frame: Frame) -> error::Result<Frame> {
         }),
         _ => Ok(frame),
     }
+}
+
+fn read_int(cursor: &mut Cursor<&[u8]>) -> error::Result<i32> {
+    let mut body_bytes: Vec<u8> = Vec::with_capacity(4);
+    unsafe {
+        body_bytes.set_len(4);
+    }
+
+    cursor.read_exact(&mut body_bytes).unwrap();
+
+    let v = i32::from_be_bytes(body_bytes.try_into().unwrap());
+    Ok(v)
+}
+
+fn read_int_length(cursor: &mut Cursor<&[u8]>) -> error::Result<usize> {
+    let v = read_int(cursor)?;
+    let v: usize = v.try_into().unwrap();
+
+    Ok(v)
+}
+
+fn read_bytes<'a>(cursor: &mut Cursor<&[u8]>) -> error::Result<Vec<u8>> {
+    let len = read_int_length(cursor)?;
+    let v = read_raw_bytes(len, cursor)?;
+    Ok(v)
+}
+
+fn read_raw_bytes<'a>(count: usize, cursor: &mut Cursor<&[u8]>) -> error::Result<Vec<u8>> {
+    let mut body_bytes: Vec<u8> = Vec::with_capacity(count);
+    unsafe {
+        body_bytes.set_len(count);
+    }
+
+    cursor.read_exact(&mut body_bytes).unwrap();
+
+    Ok(body_bytes)
+}
+
+fn read_short(cursor: &mut Cursor<&[u8]>) -> error::Result<u16> {
+    let mut body_bytes: Vec<u8> = Vec::with_capacity(2);
+    unsafe {
+        body_bytes.set_len(2);
+    }
+
+    cursor.read_exact(&mut body_bytes).unwrap();
+
+    let v = u16::from_be_bytes(body_bytes[0..].try_into().unwrap());
+    Ok(v)
+}
+
+fn read_short_length(buf: &mut Cursor<&[u8]>) -> error::Result<usize> {
+    let v = read_short(buf)?;
+    let v: usize = v.try_into().unwrap();
+    Ok(v)
+}
+
+fn read_string<'a>(buf: &mut Cursor<&[u8]>) -> error::Result<String> {
+    let len = read_short_length(buf)?;
+    let raw = read_raw_bytes(len, buf)?;
+    let v = std::str::from_utf8(&raw).unwrap();
+    Ok(v.into())
+}
+
+fn read_bytes_map(buf: &mut Cursor<&[u8]>) -> error::Result<HashMap<String, Vec<u8>>> {
+    let len = read_short_length(buf)?;
+    let mut v = HashMap::with_capacity(len);
+    for _ in 0..len {
+        let key = read_string(buf)?.to_owned();
+        let val = read_bytes(buf)?.to_owned();
+        v.insert(key, val);
+    }
+    Ok(v)
 }
